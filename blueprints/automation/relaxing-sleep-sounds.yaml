@@ -1,0 +1,189 @@
+blueprint:
+  name: Relaxing Sleep Sounds
+  description: >
+    Plays a looping track on selected media players at a set start time (if nothing
+    is already playing), restarts it if it stops during the night window, and stops
+    it at the set end time — but only if the blueprint's own track is still playing.
+
+    Requires no third-party integrations — uses only native Home Assistant services.
+  domain: automation
+  input:
+    media_players:
+      name: Media Players
+      description: One or more media players to control.
+      selector:
+        entity:
+          domain: media_player
+          multiple: true
+
+    media_id:
+      name: Media Content ID
+      description: >
+        The content ID of the media to play (e.g. a URL, Spotify URI, or local path).
+        Must be a format supported by your media player integration.
+      selector:
+        text: {}
+
+    media_content_type:
+      name: Media Content Type
+      description: The type of media content (e.g. music, playlist, episode).
+      default: music
+      selector:
+        select:
+          options:
+            - music
+            - playlist
+            - podcast
+            - episode
+            - channel
+            - url
+            - track
+
+    time_start:
+      name: Start Time
+      description: Time to begin playing each evening.
+      selector:
+        time: {}
+
+    time_stop:
+      name: Stop Time
+      description: Time to stop playing in the morning.
+      selector:
+        time: {}
+
+    target_volume:
+      name: Volume
+      description: Playback volume level.
+      default: 0.4
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.05
+          mode: slider
+
+    thumbnail_url:
+      name: Thumbnail URL
+      description: >
+        Optional image URL shown on the media player display while playing
+        (e.g. a raw.githubusercontent.com link to a PNG or JPG).
+        Leave blank to show no image.
+      default: ""
+      selector:
+        text: {}
+
+variables:
+  media_players: !input media_players
+  media_id: !input media_id
+  time_start: !input time_start
+  time_stop: !input time_stop
+  thumbnail_url: !input thumbnail_url
+
+trigger:
+  - platform: time
+    at: !input time_start
+    id: start
+
+  - platform: state
+    entity_id: !input media_players
+    to:
+      - idle
+      - "off"
+    for:
+      seconds: 5
+    id: restart
+
+  - platform: time
+    at: !input time_stop
+    id: stop
+
+condition: []
+
+action:
+  - choose:
+      # ── START: play on all players that aren't already playing ──────────────
+      - conditions:
+          - condition: trigger
+            id: start
+        sequence:
+          - repeat:
+              for_each: !input media_players
+              sequence:
+                - if:
+                    - condition: not
+                      conditions:
+                        - condition: state
+                          entity_id: "{{ repeat.item }}"
+                          state: playing
+                  then:
+                    - service: media_player.volume_set
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        volume_level: !input target_volume
+
+                    - service: media_player.play_media
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        media:
+                          media_content_id: !input media_id
+                          media_content_type: !input media_content_type
+                          metadata:
+                            thumbnail: "{{ thumbnail_url }}"
+
+                    - service: media_player.repeat_set
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        repeat: one
+
+      # ── RESTART: resume on the player that stopped, within the time window ──
+      - conditions:
+          - condition: trigger
+            id: restart
+          - condition: time
+            after: !input time_start
+            before: !input time_stop
+        sequence:
+          - service: media_player.volume_set
+            target:
+              entity_id: "{{ trigger.entity_id }}"
+            data:
+              volume_level: !input target_volume
+
+          - service: media_player.play_media
+            target:
+              entity_id: "{{ trigger.entity_id }}"
+            data:
+              media:
+                media_content_id: !input media_id
+                media_content_type: !input media_content_type
+                metadata:
+                  thumbnail: "{{ thumbnail_url }}"
+
+          - service: media_player.repeat_set
+            target:
+              entity_id: "{{ trigger.entity_id }}"
+            data:
+              repeat: one
+
+      # ── STOP: stop only players still playing the blueprint's own track ─────
+      - conditions:
+          - condition: trigger
+            id: stop
+        sequence:
+          - repeat:
+              for_each: !input media_players
+              sequence:
+                - if:
+                    - condition: template
+                      value_template: >
+                        {{ states(repeat.item) == 'playing' and
+                           state_attr(repeat.item, 'media_content_id') == media_id }}
+                  then:
+                    - service: media_player.media_stop
+                      target:
+                        entity_id: "{{ repeat.item }}"
+
+mode: queued
