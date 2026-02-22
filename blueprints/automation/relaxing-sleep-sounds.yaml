@@ -10,6 +10,14 @@ blueprint:
       description: Choose the media player and track.
       selector:
         media: {}
+    monitor_player:
+      name: Monitor Trigger
+      description: >
+        Due to quirks in HA, select the same media player here to monitor and
+        restart if the media player stops/fails during the night.
+      selector:
+        entity:
+          domain: media_player
     time_start:
       name: Start Time
       description: Time to begin playing each evening.
@@ -51,10 +59,15 @@ trigger:
     at: !input time_start
     id: start
 
-  # Trigger 2: Check every 5 minutes while in the active window
-  - platform: time_pattern
-    minutes: "/5"
-    id: check
+  # Trigger 2: Monitor player stops/idles
+  - platform: state
+    entity_id: !input monitor_player
+    to:
+      - idle
+      - "off"
+    for:
+      seconds: 5
+    id: restart
 
   # Trigger 3: The Clock hits Stop Time
   - platform: time
@@ -87,10 +100,10 @@ action:
             data:
               repeat: one
 
-      # --- RESTART Logic (periodic check) ---
+      # --- RESTART Logic ---
       - conditions:
           - condition: trigger
-            id: check
+            id: restart
           - condition: time
             after: !input time_start
             before: !input time_stop
