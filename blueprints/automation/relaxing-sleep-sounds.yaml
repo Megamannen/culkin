@@ -5,9 +5,15 @@ blueprint:
     during the night, and stops it at a set end time.
   domain: automation
   input:
+    media_player:
+      name: Media Player
+      description: The media player to use.
+      selector:
+        entity:
+          domain: media_player
     media:
       name: Media
-      description: Choose the media player and track.
+      description: Choose the track to play.
       selector:
         media: {}
     time_start:
@@ -39,9 +45,8 @@ blueprint:
         text: {}
 
 variables:
-  # We extract the entity_id string from the complex media object
+  media_entity: !input media_player
   media_input: !input media
-  media_entity: "{{ media_input.entity_id }}"
   media_content: "{{ media_input.media_content_id }}"
   media_type: "{{ media_input.media_content_type }}"
   thumbnail: !input thumbnail_url
@@ -54,9 +59,8 @@ trigger:
 
   # Trigger 2: The Player stops/idles (Instant Restart)
   - platform: state
-    entity_id: !input media
-    attribute: entity_id # This trick helps HA "see" the entity inside the media object
-    to: 
+    entity_id: !input media_player
+    to:
       - "idle"
       - "off"
       - "paused"
