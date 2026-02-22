@@ -1,42 +1,33 @@
 blueprint:
   name: Relaxing Sleep Sounds
   description: >
-    Plays a looping track on a media player at a set start time (if nothing
-    is already playing), restarts it if it stops during the night window, and stops
-    it at the set end time — but only if the blueprint's own track is still playing.
-
-    Requires no third-party integrations — uses only native Home Assistant services.
+    Plays a track at a start time, monitors the player to restart it if it stops 
+    during the night, and stops it at a set end time.
   domain: automation
   input:
     media:
       name: Media
-      description: Choose the media player and track to play.
+      description: Choose the media player and track.
       selector:
         media: {}
-
     time_start:
       name: Start Time
       description: Time to begin playing each evening.
       selector:
         time: {}
-
     time_stop:
       name: Stop Time
       description: Time to stop playing in the morning.
       selector:
         time: {}
-
     target_volume:
       name: Volume
-      description: Playback volume level.
       default: 0.4
       selector:
         number:
           min: 0.0
           max: 1.0
           step: 0.01
-          mode: slider
-
     thumbnail_url:
       name: Thumbnail URL
       description: >
@@ -48,93 +39,68 @@ blueprint:
         text: {}
 
 variables:
-  media: !input media
-  thumbnail_url: !input thumbnail_url
+  # We extract the entity_id string from the complex media object
+  media_input: !input media
+  media_entity: "{{ media_input.entity_id }}"
+  media_content: "{{ media_input.media_content_id }}"
+  media_type: "{{ media_input.media_content_type }}"
+  thumbnail: !input thumbnail_url
 
 trigger:
+  # Trigger 1: The Clock hits Start Time
   - platform: time
     at: !input time_start
     id: start
 
+  # Trigger 2: The Player stops/idles (Instant Restart)
   - platform: state
     entity_id: !input media
-    to:
-      - idle
+    attribute: entity_id # This trick helps HA "see" the entity inside the media object
+    to: 
+      - "idle"
       - "off"
-    for:
-      seconds: 5
+      - "paused"
     id: restart
 
+  # Trigger 3: The Clock hits Stop Time
   - platform: time
     at: !input time_stop
     id: stop
 
-condition: []
-
 action:
   - choose:
-      # ── START: play if not already playing ───────────────────────────────────
+      # --- START or RESTART Logic ---
       - conditions:
-          - condition: trigger
-            id: start
-        sequence:
-          - if:
-              - condition: template
-                value_template: "{{ not is_state(media.entity_id, 'playing') }}"
-            then:
-              - service: media_player.volume_set
-                target:
-                  entity_id: "{{ media.entity_id }}"
-                data:
-                  volume_level: !input target_volume
-
-              - service: media_player.play_media
-                target:
-                  entity_id: "{{ media.entity_id }}"
-                data:
-                  media:
-                    media_content_id: "{{ media.media_content_id }}"
-                    media_content_type: "{{ media.media_content_type }}"
-                    metadata:
-                      thumbnail: "{{ thumbnail_url }}"
-
-              - service: media_player.repeat_set
-                target:
-                  entity_id: "{{ media.entity_id }}"
-                data:
-                  repeat: one
-
-      # ── RESTART: resume if stopped during the night window ───────────────────
-      - conditions:
-          - condition: trigger
-            id: restart
-          - condition: time
-            after: !input time_start
-            before: !input time_stop
+          - or:
+              - condition: trigger
+                id: start
+              - all:
+                  - condition: trigger
+                    id: restart
+                  - condition: time
+                    after: !input time_start
+                    before: !input time_stop
         sequence:
           - service: media_player.volume_set
             target:
-              entity_id: "{{ media.entity_id }}"
+              entity_id: "{{ media_entity }}"
             data:
               volume_level: !input target_volume
-
           - service: media_player.play_media
             target:
-              entity_id: "{{ media.entity_id }}"
+              entity_id: "{{ media_entity }}"
             data:
-              media:
-                media_content_id: "{{ media.media_content_id }}"
-                media_content_type: "{{ media.media_content_type }}"
-                metadata:
-                  thumbnail: "{{ thumbnail_url }}"
-
+              media_content_id: "{{ media_content }}"
+              media_content_type: "{{ media_type }}"
+              metadata:
+                thumbnail: "{{ thumbnail }}"
           - service: media_player.repeat_set
             target:
-              entity_id: "{{ media.entity_id }}"
+              entity_id: "{{ media_entity }}"
             data:
               repeat: one
 
-      # ── STOP: stop only if the blueprint's own track is still playing ────────
+      # --- STOP Logic ---
       - conditions:
           - condition: trigger
             id: stop
@@ -142,11 +108,11 @@ action:
           - if:
               - condition: template
                 value_template: >
-                  {{ states(media.entity_id) == 'playing' and
-                     state_attr(media.entity_id, 'media_content_id') == media.media_content_id }}
+                  {{ is_state(media_entity, 'playing') and 
+                     state_attr(media_entity, 'media_content_id') == media_content }}
             then:
               - service: media_player.media_stop
                 target:
-                  entity_id: "{{ media.entity_id }}"
+                  entity_id: "{{ media_entity }}"
 
-mode: queued
+mode: restart
