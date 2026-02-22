@@ -1,19 +1,13 @@
 blueprint:
   name: Relaxing Sleep Sounds
   description: >
-    Plays a track at a start time, monitors the player to restart it if it stops 
+    Plays a track at a start time, monitors the player to restart it if it stops
     during the night, and stops it at a set end time.
   domain: automation
   input:
-    media_player:
-      name: Media Player
-      description: The media player to use.
-      selector:
-        entity:
-          domain: media_player
     media:
       name: Media
-      description: Choose the track to play.
+      description: Choose the media player and track.
       selector:
         media: {}
     time_start:
@@ -45,8 +39,8 @@ blueprint:
         text: {}
 
 variables:
-  media_entity: !input media_player
   media_input: !input media
+  media_entity: "{{ media_input.entity_id }}"
   media_content: "{{ media_input.media_content_id }}"
   media_type: "{{ media_input.media_content_type }}"
   thumbnail: !input thumbnail_url
@@ -57,14 +51,10 @@ trigger:
     at: !input time_start
     id: start
 
-  # Trigger 2: The Player stops/idles (Instant Restart)
-  - platform: state
-    entity_id: !input media_player
-    to:
-      - "idle"
-      - "off"
-      - "paused"
-    id: restart
+  # Trigger 2: Check every 5 minutes while in the active window
+  - platform: time_pattern
+    minutes: "/5"
+    id: check
 
   # Trigger 3: The Clock hits Stop Time
   - platform: time
@@ -73,17 +63,40 @@ trigger:
 
 action:
   - choose:
-      # --- START or RESTART Logic ---
+      # --- START Logic ---
       - conditions:
-          - or:
-              - condition: trigger
-                id: start
-              - all:
-                  - condition: trigger
-                    id: restart
-                  - condition: time
-                    after: !input time_start
-                    before: !input time_stop
+          - condition: trigger
+            id: start
+        sequence:
+          - service: media_player.volume_set
+            target:
+              entity_id: "{{ media_entity }}"
+            data:
+              volume_level: !input target_volume
+          - service: media_player.play_media
+            target:
+              entity_id: "{{ media_entity }}"
+            data:
+              media_content_id: "{{ media_content }}"
+              media_content_type: "{{ media_type }}"
+              metadata:
+                thumbnail: "{{ thumbnail }}"
+          - service: media_player.repeat_set
+            target:
+              entity_id: "{{ media_entity }}"
+            data:
+              repeat: one
+
+      # --- RESTART Logic (periodic check) ---
+      - conditions:
+          - condition: trigger
+            id: check
+          - condition: time
+            after: !input time_start
+            before: !input time_stop
+          - condition: template
+            value_template: >
+              {{ not is_state(media_entity, 'playing') }}
         sequence:
           - service: media_player.volume_set
             target:
@@ -112,7 +125,7 @@ action:
           - if:
               - condition: template
                 value_template: >
-                  {{ is_state(media_entity, 'playing') and 
+                  {{ is_state(media_entity, 'playing') and
                      state_attr(media_entity, 'media_content_id') == media_content }}
             then:
               - service: media_player.media_stop
