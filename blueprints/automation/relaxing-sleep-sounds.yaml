@@ -110,11 +110,8 @@ action:
               for_each: !input media_players
               sequence:
                 - if:
-                    - condition: not
-                      conditions:
-                        - condition: state
-                          entity_id: "{{ repeat.item }}"
-                          state: playing
+                    - condition: template
+                      value_template: "{{ not is_state(repeat.item, 'playing') }}"
                   then:
                     - service: media_player.volume_set
                       target:
