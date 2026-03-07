@@ -10,14 +10,6 @@ blueprint:
       description: Choose the media player and track.
       selector:
         media: {}
-    monitor_player:
-      name: Monitor Trigger
-      description: >
-        Due to quirks in HA, select the same media player here to monitor and
-        restart if the media player stops/fails during the night.
-      selector:
-        entity:
-          domain: media_player
     time_start:
       name: Start Time
       description: Time to begin playing each evening.
@@ -45,6 +37,18 @@ blueprint:
       default: ""
       selector:
         text: {}
+    do_start:
+      name: Auto-Start
+      description: Automatically start the relaxing sounds at the beginning of the time slot.
+      default: true
+      selector:
+        boolean: {}
+    do_restart:
+      name: Auto-Restart
+      description: Automatically restart the sound if it stops during the night.
+      default: true
+      selector:
+        boolean: {}
 
 variables:
   media_input: !input media
@@ -52,6 +56,8 @@ variables:
   media_content: "{{ media_input.media_content_id }}"
   media_type: "{{ media_input.media_content_type }}"
   thumbnail: !input thumbnail_url
+  do_start: !input do_start
+  do_restart: !input do_restart
 
 trigger:
   # Trigger 1: The Clock hits Start Time
@@ -61,7 +67,7 @@ trigger:
 
   # Trigger 2: Monitor player stops/idles
   - platform: state
-    entity_id: !input monitor_player
+    domain: media_player
     to:
       - idle
       - "off"
@@ -80,6 +86,8 @@ action:
       - conditions:
           - condition: trigger
             id: start
+          - condition: template
+            value_template: "{{ do_start }}"
         sequence:
           - service: media_player.volume_set
             target:
@@ -104,12 +112,14 @@ action:
       - conditions:
           - condition: trigger
             id: restart
+          - condition: template
+            value_template: "{{ do_restart }}"
+          - condition: template
+            value_template: >
+              {{ trigger.entity_id == media_entity }}
           - condition: time
             after: !input time_start
             before: !input time_stop
-          - condition: template
-            value_template: >
-              {{ not is_state(media_entity, 'playing') }}
         sequence:
           - service: media_player.volume_set
             target:
