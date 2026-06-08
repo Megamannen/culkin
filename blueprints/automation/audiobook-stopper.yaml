@@ -1,0 +1,144 @@
+blueprint:
+  name: Audiobook Stopper
+  description: >
+    Stops an audiobook near a target time, but at a natural chapter boundary so
+    you don't lose your place mid-sentence. Detects chapter changes by watching
+    media_position reset toward zero (speed- and pause-independent). Within a
+    grace window around the target time it stops at the first boundary; at the
+    target time it cuts mid-chapter only if no boundary is imminent; and it waits
+    out an imminent boundary up to the end of the window as a failsafe.
+
+    Note: if T + grace crosses midnight the window check may misjudge around
+    midnight. Requires native Home Assistant only.
+  domain: automation
+  input:
+    media_player:
+      name: Media Player
+      description: The audiobook media player to track and stop.
+      selector:
+        entity:
+          filter:
+            - domain: media_player
+    target_stop:
+      name: Target Stop Time
+      description: The time you want the audiobook to stop around.
+      selector:
+        time: {}
+    grace_window:
+      name: Grace Window
+      description: >
+        How many minutes before/after the target time a stop is allowed to drift
+        so it can land on a chapter boundary.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 120
+          step: 1
+          unit_of_measurement: min
+          mode: box
+
+variables:
+  media_entity: !input media_player
+  grace_minutes: !input grace_window
+  grace_seconds: "{{ (grace_minutes | float) * 60 }}"
+
+trigger:
+  # Trigger 1: media_position changed (candidate chapter boundary). Filtered below.
+  - platform: state
+    entity_id: !input media_player
+    attribute: media_position
+    id: reset
+
+  # Trigger 2: the target stop time.
+  - platform: time
+    at: !input target_stop
+    id: target
+
+action:
+  - choose:
+      # --- Branch A: clean chapter boundary inside the window ---
+      - conditions:
+          - condition: trigger
+            id: reset
+          - condition: template
+            value_template: "{{ is_state(media_entity, 'playing') }}"
+          # Within [T - grace, T + grace]
+          - condition: template
+            value_template: >
+              {% set t = today_at(target_stop) %}
+              {% set lo = t - timedelta(minutes=grace_minutes | int) %}
+              {% set hi = t + timedelta(minutes=grace_minutes | int) %}
+              {{ lo <= now() <= hi }}
+          # Genuine reset: dropped to a low value from a higher one.
+          - condition: template
+            value_template: >
+              {% set to_pos = trigger.to_state.attributes.media_position %}
+              {% set from_pos = trigger.from_state.attributes.media_position
+                 if trigger.from_state is not none else none %}
+              {{ to_pos is not none and from_pos is not none
+                 and (to_pos | float) < 10
+                 and (from_pos | float) > (to_pos | float) }}
+        sequence:
+          - service: media_player.media_pause
+            target:
+              entity_id: "{{ media_entity }}"
+          - delay:
+              seconds: 2
+          - service: media_player.media_stop
+            target:
+              entity_id: "{{ media_entity }}"
+
+      # --- Branch B: the target time decision ---
+      - conditions:
+          - condition: trigger
+            id: target
+          - condition: template
+            value_template: "{{ is_state(media_entity, 'playing') }}"
+        sequence:
+          - variables:
+              remaining: >
+                {% set pos = state_attr(media_entity, 'media_position') %}
+                {% set dur = state_attr(media_entity, 'media_duration') %}
+                {% set upd = state_attr(media_entity, 'media_position_updated_at') %}
+                {% if pos is not none and dur is not none %}
+                  {% set live = (pos | float) + (now() - upd).total_seconds()
+                     if upd is not none else (pos | float) %}
+                  {{ (dur | float) - live }}
+                {% else %}
+                  none
+                {% endif %}
+          - if:
+              # Unknown remaining, or no boundary imminent -> cut now.
+              - condition: template
+                value_template: >
+                  {{ remaining == 'none'
+                     or (remaining | float) >= (grace_seconds | float) }}
+            then:
+              - service: media_player.media_pause
+                target:
+                  entity_id: "{{ media_entity }}"
+              - delay:
+                  seconds: 2
+              - service: media_player.media_stop
+                target:
+                  entity_id: "{{ media_entity }}"
+            else:
+              # Boundary imminent: wait for it, or fail safe at T + grace.
+              - wait_for_trigger:
+                  - platform: state
+                    entity_id: "{{ media_entity }}"
+                    attribute: media_position
+                timeout:
+                  minutes: "{{ grace_minutes | int }}"
+                continue_on_timeout: true
+              - service: media_player.media_pause
+                target:
+                  entity_id: "{{ media_entity }}"
+              - delay:
+                  seconds: 2
+              - service: media_player.media_stop
+                target:
+                  entity_id: "{{ media_entity }}"
+
+mode: single
