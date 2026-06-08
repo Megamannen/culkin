@@ -40,8 +40,9 @@ blueprint:
 
 variables:
   media_entity: !input media_player
+  target_stop: !input target_stop
   grace_minutes: !input grace_window
-  grace_seconds: "{{ (grace_minutes | float) * 60 }}"
+  grace_seconds: "{{ (grace_minutes | float(0)) * 60 }}"
 
 trigger:
   # Trigger 1: media_position changed (candidate chapter boundary). Filtered below.
@@ -67,8 +68,8 @@ action:
           - condition: template
             value_template: >
               {% set t = today_at(target_stop) %}
-              {% set lo = t - timedelta(minutes=grace_minutes | int) %}
-              {% set hi = t + timedelta(minutes=grace_minutes | int) %}
+              {% set lo = t - timedelta(minutes=grace_minutes | int(0)) %}
+              {% set hi = t + timedelta(minutes=grace_minutes | int(0)) %}
               {{ lo <= now() <= hi }}
           # Genuine reset: dropped to a low value from a higher one.
           - condition: template
@@ -77,15 +78,15 @@ action:
               {% set from_pos = trigger.from_state.attributes.media_position
                  if trigger.from_state is not none else none %}
               {{ to_pos is not none and from_pos is not none
-                 and (to_pos | float) < 10
-                 and (from_pos | float) > (to_pos | float) }}
+                 and (to_pos | float(999)) < 10
+                 and (from_pos | float(0)) > (to_pos | float(999)) }}
         sequence:
-          - service: media_player.media_pause
+          - action: media_player.media_pause
             target:
               entity_id: "{{ media_entity }}"
           - delay:
               seconds: 2
-          - service: media_player.media_stop
+          - action: media_player.media_stop
             target:
               entity_id: "{{ media_entity }}"
 
@@ -102,42 +103,44 @@ action:
                 {% set dur = state_attr(media_entity, 'media_duration') %}
                 {% set upd = state_attr(media_entity, 'media_position_updated_at') %}
                 {% if pos is not none and dur is not none %}
-                  {% set live = (pos | float) + (now() - upd).total_seconds()
-                     if upd is not none else (pos | float) %}
-                  {{ (dur | float) - live }}
+                  {% set live = (pos | float(0)) + (now() - upd).total_seconds()
+                     if upd is not none else (pos | float(0)) %}
+                  {{ (dur | float(0)) - live }}
                 {% else %}
-                  none
+                  {{ 1e12 }}
                 {% endif %}
           - if:
               # Unknown remaining, or no boundary imminent -> cut now.
               - condition: template
                 value_template: >
-                  {{ remaining == 'none'
-                     or (remaining | float) >= (grace_seconds | float) }}
+                  {{ (remaining | float(0)) >= (grace_seconds | float(0)) }}
             then:
-              - service: media_player.media_pause
+              - action: media_player.media_pause
                 target:
                   entity_id: "{{ media_entity }}"
               - delay:
                   seconds: 2
-              - service: media_player.media_stop
+              - action: media_player.media_stop
                 target:
                   entity_id: "{{ media_entity }}"
             else:
               # Boundary imminent: wait for it, or fail safe at T + grace.
               - wait_for_trigger:
-                  - platform: state
-                    entity_id: "{{ media_entity }}"
+                  # Fires once when position crosses below 10 (chapter rollover),
+                  # not on every intermediate position tick.
+                  - platform: numeric_state
+                    entity_id: !input media_player
                     attribute: media_position
+                    below: 10
                 timeout:
-                  minutes: "{{ grace_minutes | int }}"
+                  minutes: !input grace_window
                 continue_on_timeout: true
-              - service: media_player.media_pause
+              - action: media_player.media_pause
                 target:
                   entity_id: "{{ media_entity }}"
               - delay:
                   seconds: 2
-              - service: media_player.media_stop
+              - action: media_player.media_stop
                 target:
                   entity_id: "{{ media_entity }}"
 
