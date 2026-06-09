@@ -55,3 +55,4 @@ https://raw.githubusercontent.com/YOUR_USERNAME/culkin/main/blueprints/automatio
 | Media Player | A single `media_player` entity to track and stop |
 | Target Stop Time | The time you want the audiobook to stop around |
 | Grace Window | Minutes before/after the target a stop may drift to land on a chapter boundary (default 15) |
+| Override Stop Time | A time-only `input_datetime` helper. When set to anything other than `00:00` it replaces the Target Stop Time for that night, then resets to `00:00` after the stop (one-shot). `00:00` means off. |

@@ -1,12 +1,16 @@
 blueprint:
   name: Audiobook Stopper
   description: >
-    Stops an audiobook near a target time, but at a natural chapter boundary so
-    you don't lose your place mid-sentence. Detects chapter changes by watching
+    Stops an audiobook near a target time, preferring a natural chapter boundary
+    so you don't lose your place mid-sentence. Detects chapter changes by watching
     media_position reset toward zero (speed- and pause-independent). Within a
-    grace window around the target time it stops at the first boundary; at the
-    target time it cuts mid-chapter only if no boundary is imminent; and it waits
-    out an imminent boundary up to the end of the window as a failsafe.
+    grace window around the target time it stops at the first boundary; if no
+    boundary occurs it stops at the target time.
+
+    Optional override: select a time-only input_datetime helper. When it is set to
+    anything other than 00:00 it replaces the target stop time for that night and is
+    reset to 00:00 after the stop (one-shot). 00:00 means "off"; you cannot override
+    to exactly midnight.
 
     Note: if T + grace crosses midnight the window check may misjudge around
     midnight. Requires native Home Assistant only.
@@ -37,18 +41,46 @@ blueprint:
           step: 1
           unit_of_measurement: min
           mode: box
+    override_stop:
+      name: Override Stop Time
+      description: >
+        A time-only input_datetime helper. When set to anything other than 00:00 it
+        replaces the Target Stop Time for tonight, then is reset to 00:00 after a
+        stop. Leave it at 00:00 to use the default. A helper must be selected here
+        even if you don't use the override.
+      selector:
+        entity:
+          filter:
+            - domain: input_datetime
 
 variables:
   media_entity: !input media_player
   target_stop: !input target_stop
   grace_minutes: !input grace_window
   grace_seconds: "{{ (grace_minutes | float(0)) * 60 }}"
+  override_entity: !input override_stop
+  override_ts: "{{ state_attr(override_entity, 'timestamp') | int(0) }}"
+  override_active: "{{ (override_ts | int(0)) != 0 }}"
+  effective_target: "{{ states(override_entity) if override_active else target_stop }}"
+  remaining: >
+    {% set pos = state_attr(media_entity, 'media_position') %}
+    {% set dur = state_attr(media_entity, 'media_duration') %}
+    {% set upd = state_attr(media_entity, 'media_position_updated_at') %}
+    {% if pos is not none and dur is not none %}
+      {% set live = (pos | float(0)) + (now() - upd).total_seconds()
+         if upd is not none else (pos | float(0)) %}
+      {{ (dur | float(0)) - live }}
+    {% else %}
+      {{ 1e12 }}
+    {% endif %}
 
 trigger:
   # Trigger 1: media_position changed (candidate chapter boundary). Filtered below.
-  - platform: state
+  - platform: numeric_state
     entity_id: !input media_player
     attribute: media_position
+    above: -1
+    below: 30
     id: reset
 
   # Trigger 2: the target stop time.
@@ -56,92 +88,65 @@ trigger:
     at: !input target_stop
     id: target
 
+  # Trigger 3: the override stop time (input_datetime helper).
+  - platform: time
+    at: !input override_stop
+    id: target_override
+
+
 action:
-  - choose:
-      # --- Branch A: clean chapter boundary inside the window ---
-      - conditions:
+  # Must be playing for any stop to make sense.
+  - condition: template
+    value_template: "{{ is_state(media_entity, 'playing') }}"
+  # Stop if any trigger condition holds, otherwise do nothing.
+  - condition: or
+    conditions:
+      # Chapter boundary inside the grace window around the effective target.
+      - condition: and
+        conditions:
           - condition: trigger
             id: reset
           - condition: template
-            value_template: "{{ is_state(media_entity, 'playing') }}"
-          # Within [T - grace, T + grace]
-          - condition: template
             value_template: >
-              {% set t = today_at(target_stop) %}
+              {% set t = today_at(effective_target) %}
               {% set lo = t - timedelta(minutes=grace_minutes | int(0)) %}
               {% set hi = t + timedelta(minutes=grace_minutes | int(0)) %}
               {{ lo <= now() <= hi }}
-          # Genuine reset: dropped to a low value from a higher one.
-          - condition: template
-            value_template: >
-              {% set to_pos = trigger.to_state.attributes.media_position %}
-              {% set from_pos = trigger.from_state.attributes.media_position
-                 if trigger.from_state is not none else none %}
-              {{ to_pos is not none and from_pos is not none
-                 and (to_pos | float(999)) < 10
-                 and (from_pos | float(0)) > (to_pos | float(999)) }}
-        sequence:
-          - action: media_player.media_pause
-            target:
-              entity_id: "{{ media_entity }}"
-          - delay:
-              seconds: 2
-          - action: media_player.media_stop
-            target:
-              entity_id: "{{ media_entity }}"
-
-      # --- Branch B: the target time decision ---
-      - conditions:
+      # The default target stop time, only when no override is active and no
+      # chapter boundary is imminent (time left in chapter >= grace_seconds).
+      - condition: and
+        conditions:
           - condition: trigger
             id: target
           - condition: template
-            value_template: "{{ is_state(media_entity, 'playing') }}"
-        sequence:
-          - variables:
-              remaining: >
-                {% set pos = state_attr(media_entity, 'media_position') %}
-                {% set dur = state_attr(media_entity, 'media_duration') %}
-                {% set upd = state_attr(media_entity, 'media_position_updated_at') %}
-                {% if pos is not none and dur is not none %}
-                  {% set live = (pos | float(0)) + (now() - upd).total_seconds()
-                     if upd is not none else (pos | float(0)) %}
-                  {{ (dur | float(0)) - live }}
-                {% else %}
-                  {{ 1e12 }}
-                {% endif %}
-          - if:
-              # Unknown remaining, or no boundary imminent -> cut now.
-              - condition: template
-                value_template: >
-                  {{ (remaining | float(0)) >= (grace_seconds | float(0)) }}
-            then:
-              - action: media_player.media_pause
-                target:
-                  entity_id: "{{ media_entity }}"
-              - delay:
-                  seconds: 2
-              - action: media_player.media_stop
-                target:
-                  entity_id: "{{ media_entity }}"
-            else:
-              # Boundary imminent: wait for it, or fail safe at T + grace.
-              - wait_for_trigger:
-                  # Fires once when position crosses below 10 (chapter rollover),
-                  # not on every intermediate position tick.
-                  - platform: numeric_state
-                    entity_id: !input media_player
-                    attribute: media_position
-                    below: 10
-                timeout:
-                  minutes: !input grace_window
-                continue_on_timeout: true
-              - action: media_player.media_pause
-                target:
-                  entity_id: "{{ media_entity }}"
-              - delay:
-                  seconds: 2
-              - action: media_player.media_stop
-                target:
-                  entity_id: "{{ media_entity }}"
+            value_template: "{{ not override_active }}"
+          - condition: template
+            value_template: >
+              {{ (remaining | float(0)) >= (grace_seconds | float(0)) }}
+      # The override stop time, only when an override is active and no chapter
+      # boundary is imminent.
+      - condition: and
+        conditions:
+          - condition: trigger
+            id: target_override
+          - condition: template
+            value_template: "{{ override_active }}"
+          - condition: template
+            value_template: >
+              {{ (remaining | float(0)) >= (grace_seconds | float(0)) }}
+  - action: media_player.media_pause
+    target:
+      entity_id: "{{ media_entity }}"
+  - delay:
+      seconds: 2
+  - action: media_player.media_stop
+    target:
+      entity_id: "{{ media_entity }}"
+  # Final step: consume the override by resetting the helper to 00:00.
+  - action: input_datetime.set_datetime
+    target:
+      entity_id: "{{ override_entity }}"
+    data:
+      time: "00:00:00"
 
 mode: single
