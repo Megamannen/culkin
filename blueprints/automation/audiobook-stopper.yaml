@@ -25,9 +25,11 @@ blueprint:
             - domain: media_player
     target_stop:
       name: Target Stop Time
-      description: The time you want the audiobook to stop around.
+      description: A time-only input_datetime helper for the time you want the audiobook to stop around.
       selector:
-        time: {}
+        entity:
+          filter:
+            - domain: input_datetime
     grace_window:
       name: Grace Window
       description: >
@@ -61,7 +63,7 @@ variables:
   override_entity: !input override_stop
   override_ts: "{{ state_attr(override_entity, 'timestamp') | int(0) }}"
   override_active: "{{ (override_ts | int(0)) != 0 }}"
-  effective_target: "{{ states(override_entity) if override_active else target_stop }}"
+  effective_target: "{{ states(override_entity) if override_active else states(target_stop) }}"
   remaining: >
     {% set pos = state_attr(media_entity, 'media_position') %}
     {% set dur = state_attr(media_entity, 'media_duration') %}
