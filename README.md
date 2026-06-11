@@ -34,7 +34,7 @@ https://raw.githubusercontent.com/YOUR_USERNAME/culkin/main/blueprints/automatio
 
 ### Audiobook Stopper
 
-Stops an audiobook near a target time, but at a natural chapter boundary so you don't lose your place mid-sentence. It detects chapter changes by watching `media_position` reset toward zero (so it's independent of playback speed and pauses). Within a grace window around the target time it stops at the first boundary; at the target time it cuts mid-chapter only if no boundary is imminent; and it waits out an imminent boundary up to the end of the window as a failsafe. Halting is `pause` then `stop` so your resume position is preserved. If duration/position aren't reported, it degrades to simply stopping at the target time.
+Stops an audiobook near a target time, but at a natural chapter boundary so you don't lose your place mid-sentence. It detects chapter changes by watching `media_position` reset toward zero (so it's independent of playback speed and pauses). Within an early grace window before the target time it stops at the first boundary; at the target time it cuts mid-chapter only if no boundary is imminent within the late grace window; and it waits out an imminent boundary as a failsafe. Halting is `pause` then `stop` so your resume position is preserved. If duration/position aren't reported, it degrades to simply stopping at the target time.
 
 **Requirements:** Native Home Assistant only. No third-party integrations needed.
 
@@ -54,5 +54,6 @@ https://raw.githubusercontent.com/YOUR_USERNAME/culkin/main/blueprints/automatio
 |---|---|
 | Media Player | A single `media_player` entity to track and stop |
 | Target Stop Time | The time you want the audiobook to stop around |
-| Grace Window | Minutes before/after the target a stop may drift to land on a chapter boundary (default 15) |
+| Early Grace Window | Minutes before the target a stop may land on a chapter boundary; 0 disables stopping early (default 10) |
+| Late Grace Window | Minutes after the target a stop may drift to land on or wait out a chapter boundary; 0 always cuts at the target (default 10) |
 | Override Stop Time | A time-only `input_datetime` helper. When set to anything other than `00:00` it replaces the Target Stop Time for that night, then resets to `00:00` after the stop (one-shot). `00:00` means off. |

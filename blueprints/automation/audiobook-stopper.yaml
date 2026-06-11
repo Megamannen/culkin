@@ -3,18 +3,18 @@ blueprint:
   description: >
     Stops an audiobook near a target time, preferring a natural chapter boundary
     so you don't lose your place mid-sentence. Detects chapter changes by watching
-    media_position reset toward zero (speed- and pause-independent). Within a
-    grace window before the target time it stops at the first boundary. At the
-    target time, if the chapter ends within the grace window, it waits for the
-    boundary (or the estimated chapter end, assuming 1x playback) and then
-    stops; otherwise it stops immediately.
+    media_position reset toward zero (speed- and pause-independent). Within the
+    early grace window before the target time it stops at the first boundary. At
+    the target time, if the chapter ends within the late grace window, it waits
+    for the boundary (or the estimated chapter end, assuming 1x playback) and
+    then stops; otherwise it stops immediately.
 
     Optional override: select a time-only input_datetime helper. When it is set to
     anything other than 00:00 it replaces the target stop time for that night and is
     reset to 00:00 after the stop (one-shot). 00:00 means "off"; you cannot override
     to exactly midnight.
 
-    Note: if T + grace crosses midnight the window check may misjudge around
+    Note: if T + late grace crosses midnight the window check may misjudge around
     midnight. Requires native Home Assistant only.
   domain: automation
   input:
@@ -32,15 +32,28 @@ blueprint:
         entity:
           filter:
             - domain: input_datetime
-    grace_window:
-      name: Grace Window
+    early_grace_window:
+      name: Early Grace Window
       description: >
-        How many minutes before/after the target time a stop is allowed to drift
-        so it can land on a chapter boundary.
+        How many minutes before the target time a stop is allowed to land on a
+        chapter boundary. 0 disables stopping before the target.
       default: 10
       selector:
         number:
-          min: 1
+          min: 0
+          max: 120
+          step: 1
+          unit_of_measurement: min
+          mode: box
+    late_grace_window:
+      name: Late Grace Window
+      description: >
+        How many minutes after the target time a stop is allowed to drift so it
+        can land on or wait out a chapter boundary. 0 always cuts at the target.
+      default: 10
+      selector:
+        number:
+          min: 0
           max: 120
           step: 1
           unit_of_measurement: min
@@ -60,8 +73,9 @@ blueprint:
 variables:
   media_entity: !input media_player
   target_stop: !input target_stop
-  grace_minutes: !input grace_window
-  grace_seconds: "{{ (grace_minutes | float(0)) * 60 }}"
+  early_grace_minutes: !input early_grace_window
+  late_grace_minutes: !input late_grace_window
+  late_grace_seconds: "{{ (late_grace_minutes | float(0)) * 60 }}"
   override_entity: !input override_stop
   override_ts: "{{ state_attr(override_entity, 'timestamp') | int(0) }}"
   override_active: "{{ (override_ts | int(0)) != 0 }}"
@@ -105,7 +119,7 @@ action:
   # Stop if any trigger condition holds, otherwise do nothing.
   - condition: or
     conditions:
-      # Chapter boundary inside the grace window around the effective target.
+      # Chapter boundary inside the early/late grace window around the effective target.
       - condition: and
         conditions:
           - condition: trigger
@@ -113,8 +127,8 @@ action:
           - condition: template
             value_template: >
               {% set t = today_at(effective_target) %}
-              {% set lo = t - timedelta(minutes=grace_minutes | int(0)) %}
-              {% set hi = t + timedelta(minutes=grace_minutes | int(0)) %}
+              {% set lo = t - timedelta(minutes=early_grace_minutes | int(0)) %}
+              {% set hi = t + timedelta(minutes=late_grace_minutes | int(0)) %}
               {{ lo <= now() <= hi }}
       # The default target stop time, only when no override is active.
       - condition: and
@@ -130,7 +144,7 @@ action:
             id: target_override
           - condition: template
             value_template: "{{ override_active }}"
-  # At the target time with less than the grace window left in the chapter,
+  # At the target time with less than the late grace window left in the chapter,
   # let it finish: wait for the boundary, falling back to the estimated
   # chapter end (assumes 1x playback) plus a small buffer.
   - if:
@@ -139,7 +153,7 @@ action:
           - target
           - target_override
       - condition: template
-        value_template: "{{ (remaining | float(0)) < (grace_seconds | float(0)) }}"
+        value_template: "{{ (remaining | float(0)) < (late_grace_seconds | float(0)) }}"
     then:
       - wait_for_trigger:
           - platform: numeric_state
@@ -148,7 +162,7 @@ action:
             above: -1
             below: 30
         timeout:
-          seconds: "{{ ((remaining | float(0)) + 60) | round(0, 'ceil') | int }}"
+          seconds: "{{ ((remaining | float(0)) + 5) | round(0, 'ceil') | int }}"
         continue_on_timeout: true
       # A manual pause/stop during the wait cancels tonight's stop.
       - condition: template
