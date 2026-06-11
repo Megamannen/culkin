@@ -4,8 +4,10 @@ blueprint:
     Stops an audiobook near a target time, preferring a natural chapter boundary
     so you don't lose your place mid-sentence. Detects chapter changes by watching
     media_position reset toward zero (speed- and pause-independent). Within a
-    grace window around the target time it stops at the first boundary; if no
-    boundary occurs it stops at the target time.
+    grace window before the target time it stops at the first boundary. At the
+    target time, if the chapter ends within the grace window, it waits for the
+    boundary (or the estimated chapter end, assuming 1x playback) and then
+    stops; otherwise it stops immediately.
 
     Optional override: select a time-only input_datetime helper. When it is set to
     anything other than 00:00 it replaces the target stop time for that night and is
@@ -114,28 +116,43 @@ action:
               {% set lo = t - timedelta(minutes=grace_minutes | int(0)) %}
               {% set hi = t + timedelta(minutes=grace_minutes | int(0)) %}
               {{ lo <= now() <= hi }}
-      # The default target stop time, only when no override is active and no
-      # chapter boundary is imminent (time left in chapter >= grace_seconds).
+      # The default target stop time, only when no override is active.
       - condition: and
         conditions:
           - condition: trigger
             id: target
           - condition: template
             value_template: "{{ not override_active }}"
-          - condition: template
-            value_template: >
-              {{ (remaining | float(0)) >= (grace_seconds | float(0)) }}
-      # The override stop time, only when an override is active and no chapter
-      # boundary is imminent.
+      # The override stop time, only when an override is active.
       - condition: and
         conditions:
           - condition: trigger
             id: target_override
           - condition: template
             value_template: "{{ override_active }}"
-          - condition: template
-            value_template: >
-              {{ (remaining | float(0)) >= (grace_seconds | float(0)) }}
+  # At the target time with less than the grace window left in the chapter,
+  # let it finish: wait for the boundary, falling back to the estimated
+  # chapter end (assumes 1x playback) plus a small buffer.
+  - if:
+      - condition: trigger
+        id:
+          - target
+          - target_override
+      - condition: template
+        value_template: "{{ (remaining | float(0)) < (grace_seconds | float(0)) }}"
+    then:
+      - wait_for_trigger:
+          - platform: numeric_state
+            entity_id: !input media_player
+            attribute: media_position
+            above: -1
+            below: 30
+        timeout:
+          seconds: "{{ ((remaining | float(0)) + 60) | round(0, 'ceil') | int }}"
+        continue_on_timeout: true
+      # A manual pause/stop during the wait cancels tonight's stop.
+      - condition: template
+        value_template: "{{ is_state(media_entity, 'playing') }}"
   # Pause first for a softer stop; some sources (e.g. Jellyfin via Cast)
   # don't support pause, so ignore the error and proceed to stop.
   - action: media_player.media_pause
