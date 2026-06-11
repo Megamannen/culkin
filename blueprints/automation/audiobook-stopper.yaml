@@ -136,7 +136,10 @@ action:
           - condition: template
             value_template: >
               {{ (remaining | float(0)) >= (grace_seconds | float(0)) }}
+  # Pause first for a softer stop; some sources (e.g. Jellyfin via Cast)
+  # don't support pause, so ignore the error and proceed to stop.
   - action: media_player.media_pause
+    continue_on_error: true
     target:
       entity_id: "{{ media_entity }}"
   - delay:
