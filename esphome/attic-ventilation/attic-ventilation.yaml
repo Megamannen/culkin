@@ -1,6 +1,10 @@
 substitutions:
   name: "attic-ventilation"
   friendly_name: "Attic Ventilation"
+  mode_normal: "Normal"
+  mode_away: "Bortaläge"
+  mode_overpressure: "Braskamin/köksfläkt"
+  mode_max: "Maxflöde"
 
 esphome:
   name: "${name}"
@@ -42,15 +46,18 @@ esp32:
 
 # Enable logging
 logger:
-  level: WARNING  # Set log level to DEBUG, INFO, WARNING, ERROR, or CRITICAL
-  hardware_uart: USB_SERIAL_JTAG  
+  level: WARN  # Set log level to DEBUG, INFO, WARN, ERROR, or CRITICAL
+  hardware_uart: UART0
 
 # Enable Home Assistant API
 api:
+  encryption:
+    key: !secret api_encryption_key
 
 # Enable over-the-air updates
 ota:
-    - platform: esphome
+  - platform: esphome
+    password: !secret ota_password
 
 wifi:
   ssid: !secret wifi_ssid
@@ -99,21 +106,21 @@ switch:
     internal: true
     restore_mode: ALWAYS_OFF
     interlock: &interlock_group [sw_bortalage, sw_braskamin, sw_maxflode]
-    interlock_wait_time: 250ms
+    interlock_wait_time: &interlock_wait 250ms
   - platform: gpio
     id: sw_braskamin
     pin: GPIO21
     internal: true
     restore_mode: ALWAYS_OFF
     interlock: *interlock_group
-    interlock_wait_time: 250ms
+    interlock_wait_time: *interlock_wait
   - platform: gpio
     id: sw_maxflode
     pin: GPIO1
     internal: true
     restore_mode: ALWAYS_OFF
     interlock: *interlock_group
-    interlock_wait_time: 250ms
+    interlock_wait_time: *interlock_wait
 #  - platform: gpio
 #    id: relay4
 #    pin: GPIO0
@@ -133,17 +140,17 @@ select:
     optimistic: true
     restore_value: true
     options:
-      - "Normal"
-      - "Bortaläge"
-      - "Braskamin/köksfläkt"
-      - "Maxflöde"
+      - "${mode_normal}"
+      - "${mode_away}"
+      - "${mode_overpressure}"
+      - "${mode_max}"
     set_action:
       - lambda: |-
-          if (x == "Bortaläge") {
+          if (x == "${mode_away}") {
             id(sw_bortalage).turn_on();
-          } else if (x == "Braskamin/köksfläkt") {
+          } else if (x == "${mode_overpressure}") {
             id(sw_braskamin).turn_on();
-          } else if (x == "Maxflöde") {
+          } else if (x == "${mode_max}") {
             id(sw_maxflode).turn_on();
           } else {
             id(sw_bortalage).turn_off();
