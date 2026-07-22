@@ -1,0 +1,220 @@
+# =============================================================================
+# LoRa P2P Remote Temperature - Hub / Receiver
+# =============================================================================
+# Board : Heltec WiFi LoRa 32 V2 (ESP32 + SX1276)  ->  ESPHome `sx127x` component
+# Role  : Listens in continuous RX for raw LoRa packets from DIY sensor nodes
+#         (Seeed XIAO nRF52840 + Wio-SX1262 running Arduino/RadioLib) and
+#         republishes them to Home Assistant. The hub never transmits.
+#
+# -----------------------------------------------------------------------------
+# PACKET CONTRACT  (must match the RadioLib sender byte-for-byte)
+# -----------------------------------------------------------------------------
+# 6-byte payload, little-endian. LoRa PHY CRC covers integrity (no app checksum).
+#
+#   offset  field    type    encoding
+#   ------  -------  ------   ---------------------------------
+#   0       node_id  u8       1..255, unique per node
+#   1..2    temp     int16    centi-degrees C   (value = C * 100)
+#   3..4    batt_mv  u16      battery millivolts
+#   5       seq      u8       increments per send, wraps 255 -> 0
+#
+# RADIO (identical on sender and hub):
+#   EU868, 868.1 MHz, LoRa, SF10, BW 125 kHz, CR 4/5,
+#   sync word 0x12 (private), preamble 8, explicit header, CRC on.
+#
+# SYNC-WORD GOTCHA: SX126x and SX127x encode the sync word differently.
+#   RadioLib `radio.setSyncWord(0x12)` on the XIAO corresponds to `sync_value: 0x12`
+#   here. If zero packets arrive, this mapping is suspect #1 (0x12 <-> 0x1424).
+# =============================================================================
+
+substitutions:
+  name: "lora-remote-temperature"
+  friendly_name: "LoRa Remote Temperature"
+  # --- Node 1 --- (to add a node: copy this pair + the matching per-node blocks
+  #                 below, bump node1_* -> node2_*, and add an else-if in on_packet)
+  node1_id: 1
+  node1_name: "Shed"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  name_add_mac_suffix: true
+  project:
+    name: "culkin.lora_remote_temperature"
+    version: "1.0"
+  min_version: "2025.7.0"
+
+esp32:
+  board: heltec_wifi_lora_32_V2
+  framework:
+    type: esp-idf   # matches attic-ventilation; fall back to `arduino` only on a build issue
+
+logger:
+  level: DEBUG      # lower to INFO/WARN after bring-up
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+# Enable over-the-air updates
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Fallback hotspot (captive portal) if Wi-Fi fails
+  ap:
+    ssid: "lora-remote-temperature"
+
+captive_portal:
+
+web_server:
+  port: 80
+
+# --- LoRa radio -------------------------------------------------------------
+# `board:` does NOT wire the radio - these are the fixed Heltec V2 PCB traces.
+spi:
+  clk_pin: GPIO5
+  mosi_pin: GPIO27
+  miso_pin: GPIO19
+
+sx127x:
+  cs_pin: GPIO18
+  rst_pin: GPIO14
+  dio0_pin: GPIO26
+  frequency: 868.1MHz
+  modulation: LORA
+  bandwidth: 125_0kHz
+  spreading_factor: 10
+  coding_rate: CR_4_5
+  sync_value: 0x12
+  preamble_size: 8
+  crc_enable: true
+  rx_start: true          # stay in continuous receive; RX-only hub, no pa_* needed
+  on_packet:
+    then:
+      - lambda: |-
+          if (x.size() < 6) return;
+          uint8_t  nid = x[0];
+          int16_t  t   = (int16_t)(x[1] | (x[2] << 8));
+          uint16_t mv  = (uint16_t)(x[3] | (x[4] << 8));
+          uint8_t  seq = x[5];
+          ESP_LOGD("lora", "node=%u temp=%.2f batt=%.3f seq=%u rssi=%d snr=%.1f",
+                   nid, t / 100.0f, mv / 1000.0f, seq, (int) rssi, (float) snr);
+
+          // --- Node 1 ---
+          if (nid == ${node1_id}) {
+            id(node_${node1_id}_temp).publish_state(t / 100.0f);
+            id(node_${node1_id}_batt).publish_state(mv / 1000.0f);
+            id(node_${node1_id}_rssi).publish_state(rssi);
+            id(node_${node1_id}_snr).publish_state(snr);
+            id(node_${node1_id}_online).publish_state(true);
+            id(node_${node1_id}_timeout).execute();   // restart 24 h silence timer
+            // Smoothed packet loss (EMA, alpha 0.1) from sequence-number gaps.
+            int last = id(node_${node1_id}_last_seq);
+            if (last >= 0) {
+              uint8_t gap = (uint8_t)(seq - (uint8_t) last);
+              if (gap == 0) {
+                // duplicate retransmit - ignore
+              } else if (gap > 32) {
+                // long silence / re-sync - skip so it doesn't spike to ~100%
+              } else {
+                float inst = (float)(gap - 1) / (float) gap * 100.0f;   // % lost this interval
+                id(node_${node1_id}_loss_ema) += 0.1f * (inst - id(node_${node1_id}_loss_ema));
+                id(node_${node1_id}_loss).publish_state(id(node_${node1_id}_loss_ema));
+              }
+            }
+            id(node_${node1_id}_last_seq) = seq;
+          }
+          // To add a node: else if (nid == 2) { publish to node_2_* ... } (see top-of-file note)
+          else {
+            ESP_LOGW("lora", "packet from unconfigured node_id=%u", nid);
+          }
+
+# --- Per-node state ---------------------------------------------------------
+globals:
+  - id: node_${node1_id}_last_seq
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: node_${node1_id}_loss_ema
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+
+# Restarted on every received packet; publishes offline only after 24 h of silence.
+script:
+  - id: node_${node1_id}_timeout
+    mode: restart
+    then:
+      - delay: 24h
+      - lambda: 'id(node_${node1_id}_online).publish_state(false);'
+
+# --- Entities ---------------------------------------------------------------
+# Template sensors carry no lambda: state is pushed from on_packet above.
+sensor:
+  - platform: template
+    id: node_${node1_id}_temp
+    name: "${node1_name} Temperature"
+    device_class: temperature
+    state_class: measurement
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+  - platform: template
+    id: node_${node1_id}_batt
+    name: "${node1_name} Battery"
+    device_class: voltage
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+  - platform: template
+    id: node_${node1_id}_rssi
+    name: "${node1_name} RSSI"
+    device_class: signal_strength
+    state_class: measurement
+    unit_of_measurement: "dBm"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    id: node_${node1_id}_snr
+    name: "${node1_name} SNR"
+    state_class: measurement
+    unit_of_measurement: "dB"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+  - platform: template
+    id: node_${node1_id}_loss
+    name: "${node1_name} Packet Loss"
+    state_class: measurement
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+
+  # Hub diagnostics
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: template
+    id: node_${node1_id}_online
+    name: "${node1_name} Online"
+    device_class: connectivity
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+    ssid:
+      name: "Connected SSID"
+      entity_category: diagnostic
+    mac_address:
+      name: "MAC Address"
+      entity_category: diagnostic
